@@ -90,7 +90,7 @@ BOOL CLyricsWindow::Create(LPCTSTR lpszClassName,int nWidth,int nHeight)
 {
 	if(!RegisterWndClass(lpszClassName))
 	{
-		TRACE("Class　Registration　Failedn");
+		TRACE(L"Class　Registration　Failedn");
 	}
 
 	//--------------------------------------------
@@ -375,22 +375,31 @@ void CLyricsWindow::DrawLyricsDoubleLine(Gdiplus::Graphics* pGraphics)
     Gdiplus::RectF nextBoundingBox;
     pGraphics->MeasureString(m_strNextLyric, -1, m_pFont, layoutRect, m_pTextFormat, &nextBoundingBox, 0, 0);
     nextBoundingBox.Width += 1; //测量到的文本宽度加1，以防止出现使用某些字体时，最后一个字符无法显示的问题
-    //计算歌词画出的位置
-    Gdiplus::RectF dstRect;		//文字的矩形
-    Gdiplus::RectF nextRect;	//下一句文本的矩形
-
-    dstRect = Gdiplus::RectF(0, m_toobar_height + (lyricHeight / 2 - boundingBox.Height) / 2, boundingBox.Width, boundingBox.Height);
-    nextRect = Gdiplus::RectF(m_nWidth - nextBoundingBox.Width, dstRect.Y + lyricHeight / 2, nextBoundingBox.Width, nextBoundingBox.Height);
-
-    if (bSwap)
+    // 计算歌词画出的位置
+    Gdiplus::RectF dstRect{0, m_toobar_height + (lyricHeight / 2 - boundingBox.Height) / 2, boundingBox.Width, boundingBox.Height};
+    Gdiplus::RectF nextRect{0, dstRect.Y + lyricHeight / 2, nextBoundingBox.Width, nextBoundingBox.Height};
+    if (bSwap) std::swap(dstRect.Y, nextRect.Y);
+    switch (m_alignment)
     {
-        std::swap(dstRect.Y, nextRect.Y);
-        nextRect.X = 0;
+    case Alignment::RIGHT:
         dstRect.X = m_nWidth - dstRect.Width;
+        nextRect.X = m_nWidth - nextRect.Width;
+        break;
+    case Alignment::AUTO:
+        if (bSwap)
+            dstRect.X = m_nWidth - dstRect.Width;
+        else
+            nextRect.X = m_nWidth - nextRect.Width;
+        break;
+    case Alignment::CENTER:
+        dstRect.X = (m_nWidth - dstRect.Width) / 2.0f;
+        nextRect.X = (m_nWidth - nextRect.Width) / 2.0f;
+        break;
+    default:
+        break;
     }
-
-    DrawLyricText(pGraphics, m_lpszLyrics, dstRect, true, false, true);			// 当前歌词，不是翻译，显示高亮
-    DrawLyricText(pGraphics, m_strNextLyric, nextRect, false, false, false);	// 下一句歌词，不是翻译，不显示高亮
+    DrawLyricText(pGraphics, m_lpszLyrics, dstRect, true, false, true);	        // 当前歌词，不是翻译，显示高亮
+    DrawLyricText(pGraphics, m_strNextLyric, nextRect, false, false, false);   // 下一句歌词，不是翻译，不显示高亮
 }
 
 //绘制高亮歌词
@@ -421,36 +430,36 @@ void CLyricsWindow::DrawHighlightLyrics(Gdiplus::Graphics* pGraphics,Gdiplus::Gr
 //创建渐变画刷
 Gdiplus::Brush* CLyricsWindow::CreateGradientBrush(LyricsGradientMode TextGradientMode,Gdiplus::Color& Color1,Gdiplus::Color& Color2, Gdiplus::RectF& dstRect)
 {
-	Gdiplus::PointF pt1;
-	Gdiplus::PointF pt2;
-	Gdiplus::Brush* pBrush=NULL;
-	switch (TextGradientMode)
-	{
-	case LyricsGradientMode_Two://两色渐变
-		{
-			Gdiplus::PointF point1(dstRect.X,dstRect.Y);
-			Gdiplus::PointF point2(dstRect.X,dstRect.Y+dstRect.Height);
-			pBrush=new Gdiplus::LinearGradientBrush(point1,point2,Color1,Color2);
-			((Gdiplus::LinearGradientBrush*)pBrush)->SetWrapMode(Gdiplus::WrapModeTileFlipXY);
-			break;
-		}
+    // 单色画刷
+    if (TextGradientMode != LyricsGradientMode_Two && TextGradientMode != LyricsGradientMode_Three)
+    {
+        Gdiplus::SolidBrush* pSolidBrush = new Gdiplus::SolidBrush(Color1);
+        return static_cast<Gdiplus::Brush*>(pSolidBrush);
+    }
 
-	case LyricsGradientMode_Three://三色渐变
-		{
-			Gdiplus::PointF point1(dstRect.X,dstRect.Y);
-			Gdiplus::PointF point2(dstRect.X,dstRect.Y+dstRect.Height/2);
-			pBrush=new Gdiplus::LinearGradientBrush(point1,point2,Color1,Color2);
-			((Gdiplus::LinearGradientBrush*)pBrush)->SetWrapMode(Gdiplus::WrapModeTileFlipXY);
-			break;
-		}
+    Gdiplus::PointF point1(dstRect.X, dstRect.Y);
+    Gdiplus::PointF point2(dstRect.X, dstRect.Y);
+    if (TextGradientMode == LyricsGradientMode_Two)
+        point2.Y += dstRect.Height;
+    else
+        point2.Y += dstRect.Height / 2;     // 这里的三色渐变是靠环绕模式对映
 
-	default://无渐变
-		{
-			pBrush=new Gdiplus::SolidBrush(Color1);
-			break;
-		}
-	}
-	return pBrush;
+    // 创建线性渐变画刷
+    Gdiplus::LinearGradientBrush* pLinearGradientBrush = new Gdiplus::LinearGradientBrush(point1, point2, Gdiplus::Color(), Gdiplus::Color());
+    // 定义插值点的数量, 创建颜色和位置的向量
+    const int colorCount = 10;
+    std::array<Gdiplus::Color, colorCount> colors{};
+    std::array<Gdiplus::REAL, colorCount> positions{};
+    for (int i = 0; i < colorCount; ++i)
+    {   // CDrawingManager::SmartMixColors产生的渐变色更好，GDI+默认的渐变色有很多灰色
+        COLORREF interpolatedColor = CDrawingManager::SmartMixColors(Color1.ToCOLORREF(), Color2.ToCOLORREF(), 1.0, colorCount - i, i);
+        colors[i].SetFromCOLORREF(interpolatedColor);
+        positions[i] = static_cast<Gdiplus::REAL>(i) / (colorCount - 1);
+    }
+    // 设置插值颜色
+    pLinearGradientBrush->SetInterpolationColors(colors.data(), positions.data(), colorCount);
+    pLinearGradientBrush->SetWrapMode(Gdiplus::WrapModeTileFlipXY);// 设置环绕模式
+    return static_cast<Gdiplus::Brush*>(pLinearGradientBrush);
 }
 
 //设置歌词颜色

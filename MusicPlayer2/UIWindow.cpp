@@ -3,6 +3,16 @@
 #include "MusicPlayer2.h"
 #include "MusicPlayerDlg.h"
 
+IPlayerUI* CUIWindow::GetCurUi() const
+{
+    IPlayerUI* minimode_ui{};
+    CMusicPlayerDlg* pDlg = CMusicPlayerDlg::GetInstance();
+    if (pDlg != nullptr && pDlg->IsMiniMode())
+        minimode_ui = pDlg->GetMinimodeDlg()->GetCurUi();
+    if (minimode_ui != nullptr)
+        return minimode_ui;
+    return m_pUI;
+}
 
 void CUIWindow::PreSubclassWindow()
 {
@@ -36,6 +46,7 @@ BEGIN_MESSAGE_MAP(CUIWindow, CStatic)
     ON_WM_MOUSELEAVE()
     ON_MESSAGE(WM_TABLET_QUERYSYSTEMGESTURESTATUS, &CUIWindow::OnTabletQuerysystemgesturestatus)
     ON_WM_RBUTTONDOWN()
+    ON_WM_INITMENU()
 END_MESSAGE_MAP()
 
 
@@ -55,11 +66,11 @@ void CUIWindow::OnLButtonUp(UINT nFlags, CPoint point)
         SLayoutData lyout;
         point1.y = lyout.titlabar_height;
         ClientToScreen(&point1);
-        theApp.m_menu_set.m_main_menu_popup.TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
+        theApp.m_menu_mgr.GetMenu(MenuMgr::MainPopupMenu)->TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
     }
     else
     {
-        if (pMainWindow != nullptr && !pMainWindow->m_no_lbtnup)
+        if (pMainWindow != nullptr)
             m_pUI->LButtonUp(point);
 
         CStatic::OnLButtonUp(nFlags, point);
@@ -131,16 +142,32 @@ void CUIWindow::OnMouseMove(UINT nFlags, CPoint point)
         // 以下处理为屏幕坐标
         CRect rect_max;
         pMainWindow->GetWindowRect(rect_max);                   // 获取最大化窗口位置信息
+        int ui_width_max{ theApp.m_ui_data.draw_area_width };       // 最大化时的绘图区域宽度
         pMainWindow->SendMessage(WM_SYSCOMMAND, SC_RESTORE);
         CRect rect;
         pMainWindow->GetWindowRect(rect);                       // 获取还原后窗口位置信息
+        int ui_width_org{ theApp.m_ui_data.draw_area_width };       // 还原后的绘图区域宽度
 
         CPoint offset{ m_ptLButtonDown - rect_max.TopLeft() };  // 最大化时从窗口原点指向点击位置的向量
-        if (theApp.m_ui_data.show_playlist)                     // 将此向量映射为窗口大小还原后的对应向量（忽略边框大小）
-            offset.x *= (float)(rect.Width() / 2 - theApp.DPI(30) * 6) / (rect_max.Width() / 2 - theApp.DPI(30) * 6);
-        else
-            offset.x *= (float)(rect.Width() - theApp.DPI(30) * 6) / (rect_max.Width() - theApp.DPI(30) * 6);
-        offset = m_ptLButtonDown - rect.TopLeft() - offset;     // 计算所需偏移量
+        int cnt{ 1 };   // “关闭”按钮
+        if (theApp.m_app_setting_data.show_maximize_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_minimize_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_fullscreen_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_minimode_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_skin_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_settings_btn_in_titlebar) ++cnt;
+        if (theApp.m_app_setting_data.show_dark_light_btn_in_titlebar) ++cnt;
+        if (theApp.m_ui_data.ShowWindowMenuBar()) ++cnt;
+        // 硬编码的按钮尺寸
+        cnt *= theApp.DPI(30);
+        // 映射向量时不含按钮位置
+        ui_width_org -= cnt;
+        ui_width_max -= cnt;
+        // 将此向量映射为窗口大小还原后的对应向量（忽略边框）
+        offset.x *= ui_width_org;
+        offset.x /= ui_width_max;
+        // 计算所需偏移量
+        offset = m_ptLButtonDown - rect.TopLeft() - offset;
         pMainWindow->MoveWindow(rect + offset);
         pMainWindow->SendMessage(WM_SYSCOMMAND, SC_MOVE | HTCAPTION);
     }
@@ -160,13 +187,13 @@ void CUIWindow::OnRButtonUp(UINT nFlags, CPoint point)
     {
         CPoint point1;
         GetCursorPos(&point1);
-        theApp.m_menu_set.m_main_menu_popup.TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
+        theApp.m_menu_mgr.GetMenu(MenuMgr::MainPopupMenu)->TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
     }
     else if (nFlags == MK_SHIFT)		//按住Shift键点击鼠标右键时，弹出系统菜单
     {
         CPoint point1;
         GetCursorPos(&point1);
-        theApp.m_menu_set.m_main_menu_popup.TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
+        theApp.m_menu_mgr.GetMenu(MenuMgr::MainPopupMenu)->TrackPopupMenu(TPM_LEFTALIGN | TPM_RIGHTBUTTON, point1.x, point1.y, theApp.m_pMainWnd);
     }
     else
     {
@@ -185,7 +212,7 @@ void CUIWindow::OnPaint()
     CMusicPlayerDlg* pMainWindow = CMusicPlayerDlg::GetInstance();
     //需要重绘时通知线程强制重绘
     if (pMainWindow != nullptr)
-        pMainWindow->m_ui_thread_para.ui_force_refresh = true;
+        pMainWindow->UiForceRefresh();
 }
 
 
@@ -199,9 +226,7 @@ void CUIWindow::OnSize(UINT nType, int cx, int cy)
 
     CMusicPlayerDlg* pMainWindow = CMusicPlayerDlg::GetInstance();
     if (pMainWindow != nullptr)
-    {
-        pMainWindow->m_ui_thread_para.ui_force_refresh = true;
-    }
+        pMainWindow->UiForceRefresh();
 }
 
 

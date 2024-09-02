@@ -1,5 +1,4 @@
 ﻿#pragma once
-#include "TabDlg.h"
 #include "ListCtrlEx.h"
 #include "SearchEditCtrl.h"
 #include "MediaLibTabDlg.h"
@@ -64,8 +63,6 @@ protected:
     DialogType m_type{};
 
 protected:
-    virtual void RefreshSongList() override;        //刷新选中行的信息
-    virtual void OnTabEntered() override;
     void InitListData();
     void SetRowData(CListCtrlEx::RowData& row_data, const SongInfo& song);
     void UpdateListIndex();
@@ -73,19 +70,24 @@ protected:
     void QuickSearch(const wstring& key_word);      //根据关键字执行快速查找，将结果保存在m_list_data_searched中
     void SongListClicked(int index);
     void SetButtonsEnable(bool enable);
+    void SetPlayButtonText(bool selected_valid);    //设置父窗口中“播放”按钮的文本
+
+    virtual void OnTabEntered() override;
+    virtual void OnTabExited() override;
 
     virtual const vector<SongInfo>& GetSongList() const override;
     virtual int GetItemSelected() const override;
     virtual const vector<int>& GetItemsSelected() const override;
+    virtual void RefreshSongList() override;        //刷新选中行的信息
     virtual void AfterDeleteFromDisk(const std::vector<SongInfo>& files) override;
     virtual wstring GetSelectedString() const override;
 
     virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV 支持
-    virtual void OnOK() override;
 
     DECLARE_MESSAGE_MAP()
 public:
     virtual BOOL OnInitDialog();
+    virtual void OnOK();
     afx_msg void OnHdnItemclickSongList(NMHDR *pNMHDR, LRESULT *pResult);
     afx_msg void OnEnChangeSearchEdit();
     afx_msg void OnNMClickSongList(NMHDR *pNMHDR, LRESULT *pResult);
@@ -94,4 +96,5 @@ public:
 protected:
     afx_msg LRESULT OnSearchEditBtnClicked(WPARAM wParam, LPARAM lParam);
 public:
+    afx_msg void OnInitMenu(CMenu* pMenu);
 };

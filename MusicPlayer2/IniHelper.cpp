@@ -6,22 +6,26 @@ CIniHelper::CIniHelper(const wstring& file_path)
 {
     m_file_path = file_path;
     ifstream file_stream{ file_path };
-    if (file_stream.fail())
-    {
+    if (!file_stream.is_open())
         return;
-    }
-    //读取文件内容
+    // 获取文件大小
+    file_stream.seekg(0, std::ios::end);
+    size_t file_size = static_cast<size_t>(file_stream.tellg());
+    file_stream.seekg(0, std::ios::beg);
+    // 读取文件内容
     string ini_str;
-    while (!file_stream.eof())
-    {
-        ini_str.push_back(file_stream.get());
-    }
-    ini_str.pop_back();
-    if (!ini_str.empty() && ini_str.back() != L'\n')		//确保文件末尾有回车符
+    ini_str.resize(file_size + 1);
+    file_stream.read(&ini_str[0], file_size);
+    // 检查并添加末尾的空行
+    if (!ini_str.empty() && ini_str.back() != L'\n')
         ini_str.push_back(L'\n');
+    // 转换成Unicode
+    m_ini_str = CCommon::StrToUnicode(ini_str, CodeType::AUTO);
+}
 
-    //转换成Unicode
-    m_ini_str = CCommon::StrToUnicode(ini_str.c_str(), CodeType::AUTO);
+CIniHelper::CIniHelper(UINT id, CodeType code_type)
+{
+    m_ini_str = CCommon::GetTextResource(id, code_type);
 }
 
 
@@ -167,25 +171,15 @@ void CIniHelper::GetBoolArray(const wchar_t* AppName, const wchar_t* KeyName, bo
 
 void CIniHelper::WriteStringList(const wchar_t* AppName, const wchar_t* KeyName, const vector<wstring>& values)
 {
-    wstring str_write;
-    int index = 0;
-    for (const wstring& str : values)
-    {
-        if (index > 0)
-            str_write.push_back(L',');
-        str_write.push_back(L'\"');
-        str_write += str;
-        str_write.push_back(L'\"');
-        index++;
-    }
+    wstring str_write{ CCommon::MergeStringList(values) };
     _WriteString(AppName, KeyName, str_write);
 }
 
 void CIniHelper::GetStringList(const wchar_t* AppName, const wchar_t* KeyName, vector<wstring>& values, const vector<wstring>& default_values) const
 {
-    wstring default_str = MergeStringList(default_values);
-    wstring str_value = _GetString(AppName, KeyName, default_str.c_str());
-    SplitStringList(values, str_value);
+    wstring default_str{ CCommon::MergeStringList(default_values) };
+    wstring str_value{ _GetString(AppName, KeyName, default_str.c_str()) };
+    CCommon::SplitStringList(values, str_value);
 }
 
 CVariant CIniHelper::GetValue(const wchar_t* AppName, const wchar_t* KeyName, CVariant default_value) const
@@ -200,23 +194,101 @@ void CIniHelper::WriteValue(const wchar_t* AppName, const wchar_t* KeyName, CVar
 }
 
 
+vector<wstring> CIniHelper::GetAllAppName(const wstring& prefix) const
+{
+    vector<wstring> list;
+    size_t pos{};
+    while ((pos = m_ini_str.find(L"\n[" + prefix, pos)) != wstring::npos)
+    {
+        size_t end = m_ini_str.find(L']', pos + 1);
+        if (end != wstring::npos)
+        {
+            wstring tmp(m_ini_str.begin() + pos + prefix.size() + 2, m_ini_str.begin() + end);
+            list.push_back(std::move(tmp));
+            pos = end + 1;
+        }
+    }
+    return list;
+}
+
+void CIniHelper::GetAllKeyValues(const wstring& AppName, std::map<wstring,wstring>& map) const
+{
+    wstring app_str{ L"[" };
+    app_str.append(AppName).append(L"]");
+    size_t app_pos{}, app_end_pos{};
+    app_pos = m_ini_str.find(app_str);
+    if (app_pos == wstring::npos)
+        return;
+    app_end_pos = m_ini_str.find(L"\n[", app_pos + 2);
+    if (app_end_pos != wstring::npos)
+        app_end_pos++;
+    app_str = m_ini_str.substr(app_pos, app_end_pos - app_pos);
+    vector<wstring> line;
+    CCommon::StringSplit(app_str, L'\n', line);
+    for (wstring str : line)
+    {
+        // CCommon::StringSplit会跳过空字符串，str一定非空
+        if (str[0] == L';' || str[0] == L'#')   // 跳过注释行（只支持行首注释）
+            continue;
+        size_t pos = str.find_first_of(L'=');
+        if (pos == wstring::npos)
+            continue;
+        wstring key{ str.substr(0, pos) };
+        wstring value{ str.substr(pos + 1) };
+        CCommon::StringNormalize(key);
+        CCommon::StringNormalize(value);
+        if (!key.empty() && !value.empty())
+        {
+            if (value.front() == L'\"' && value.back() == L'\"')
+                value = value.substr(1, value.size() - 2);
+            UnEscapeString(value);
+            map[key] = value;
+        }
+    }
+}
+
 bool CIniHelper::Save()
 {
+    if (m_file_path.empty())
+        return false;
     ofstream file_stream{ m_file_path };
     if (file_stream.fail())
         return false;
-    string ini_str{ CCommon::UnicodeToStr(m_ini_str.c_str(), m_save_as_utf8 ? CodeType::UTF8_NO_BOM : CodeType::ANSI) };
-    if (m_save_as_utf8)		//如果以UTF8编码保存，先插入BOM
-    {
-        string utf8_bom;
-        utf8_bom.push_back(-17);
-        utf8_bom.push_back(-69);
-        utf8_bom.push_back(-65);
-        file_stream << utf8_bom;
-    }
-
+    string ini_str{ CCommon::UnicodeToStr(m_ini_str, m_save_as_utf8 ? CodeType::UTF8 : CodeType::ANSI) };
     file_stream << ini_str;
     return true;
+}
+
+void CIniHelper::UnEscapeString(wstring& str)
+{
+    if (str.find(L'\\') == wstring::npos) // 仅含有‘\’时需要处理转义字符
+        return;
+    bool escape{ false };
+    wstring result;
+    result.reserve(str.size());
+    for (const wchar_t ch : str)
+    {
+        if (escape)
+        {
+            switch (ch)
+            {
+            case L'n': result += L'\n'; break;
+            case L'r': result += L'\r'; break;
+            case L't': result += L'\t'; break;
+            case L'"': result += L'"'; break;
+            case L';': result += L';'; break;
+            case L'#': result += L'#'; break;
+            case L'\\': result += L'\\'; break;
+            default:result += '\\'; result += ch; break;
+            }
+            escape = false;
+        }
+        else if (ch == L'\\')
+            escape = true;
+        else
+            result += ch;
+    }
+    str.swap(result);
 }
 
 void CIniHelper::_WriteString(const wchar_t* AppName, const wchar_t* KeyName, const wstring& str)
@@ -313,33 +385,5 @@ wstring CIniHelper::_GetString(const wchar_t* AppName, const wchar_t* KeyName, c
         //如果前后有空格，则将其删除
         CCommon::StringNormalize(return_str);
         return return_str;
-    }
-}
-
-wstring CIniHelper::MergeStringList(const vector<wstring>& values)
-{
-    wstring str_merge;
-    int index = 0;
-    //在每个字符串前后加上引号，再将它们用逗号连接起来
-    for (const wstring& str : values)
-    {
-        if (index > 0)
-            str_merge.push_back(L',');
-        str_merge.push_back(L'\"');
-        str_merge += str;
-        str_merge.push_back(L'\"');
-        index++;
-    }
-    return str_merge;
-}
-
-void CIniHelper::SplitStringList(vector<wstring>& values, wstring str_value)
-{
-    CCommon::StringSplit(str_value, L"\",\"", values);
-    if (!values.empty())
-    {
-        //结果中第一项前面和最后一项的后面各还有一个引号，将它们删除
-        values.front() = values.front().substr(1);
-        values.back().pop_back();
     }
 }

@@ -1,21 +1,21 @@
 ﻿#pragma once
 #include"Common.h"
 #include"Lyric.h"
-#include"SetPathDlg.h"
 #include"AudioTag.h"
 #include "FilePathHelper.h"
 #include "BASSMidiLibrary.h"
-//#include"MusicPlayerDlg.h"
 #include "GaussBlur.h"
 #include "PlaylistMgr.h"
 #include "IPlayerCore.h"
 #include "BassCore.h"
 #include "SpectralDataHelper.h"
 #include "MediaTransControls.h"
+#include "MediaLibHelper.h"
+#include "RecentFolderMgr.h"
 
 #define WM_PLAYLIST_INI_START (WM_USER+104)         // 播放列表开始加载时的消息
 #define WM_PLAYLIST_INI_COMPLATE (WM_USER+105)      // 播放列表加载完成消息
-#define WM_SET_TITLE (WM_USER+106)                  // 设置窗口标题的消息
+#define WM_AFTER_SET_TRACK (WM_USER+106)            // 通知主窗口更新显示的消息
 #define WM_CONNOT_PLAY_WARNING (WM_USER+108)        // 无法播放文件时弹出警告提示框的消息
 #define WM_MUSIC_STREAM_OPENED (WM_USER+109)        // 当音频文件打开时的消息
 #define WM_POST_MUSIC_STREAM_OPENED (WM_USER+129)   // 当音频文件打开前的消息
@@ -51,11 +51,12 @@ public:
     //用于向初始化播放列表传递信息的结构体
     struct ThreadInfo
     {
-        bool refresh_info{};
-        bool is_playlist_mode{};                // 指示是否为播放列表模式，文件夹模式加载完播放列表后需要排序
+        MediaLibRefreshMode refresh_mode{};
         bool play{};                            // 加载完播放列表后是否立即播放
+        bool playlist_mode{};                   // 是否为播放列表模式
         int play_index{};                       // 播放索引，播放列表模式下需要在cue解析时维持其指向
         int process_percent{};
+        wstring remove_list_path{};             // 进入初始化线程后通知主窗口移除此播放列表/文件夹
     };
     //初始化播放列表的工作线程函数
     static UINT IniPlaylistThreadFunc(LPVOID lpParam);
@@ -65,7 +66,7 @@ public:
     {
         ES_NO_ERROR,
         ES_FILE_NOT_EXIST,
-        ES_FILE_CONNOT_BE_OPEN
+        ES_FILE_CANNOT_BE_OPEN
     };
 
     enum ABRepeatMode       //AB循环的模式
@@ -83,13 +84,14 @@ private:
     vector<SongInfo> m_playlist;        // 播放列表，储存每个音乐文件的各种信息
     wstring m_path;                     // 文件夹模式下，当前播放文件的目录
     wstring m_playlist_path;            // 当前播放列表文件的路径
+    CMediaClassifier::ClassificationType m_media_lib_playlist_type;     //播放列表模式为PM_MEDIA_LIB时的媒体库项目类型
+    wstring m_media_lib_playlist_name;  //播放列表模式为PM_MEDIA_LIB时媒体库项目的名称
 
     SongInfo m_current_song_tmp;        // 临时存储歌曲的信息并在播放列表初始化完成后查找播放
     int m_current_song_position_tmp;    // 临时存储歌曲的播放位置（m_current_song_tmp被找到才会应用）
     bool m_current_song_playing_tmp;    // 临时存储歌曲是否正在播放（m_current_song_tmp被找到才会应用）
 
     wstring m_current_file_type;
-    deque<PathInfo> m_recent_path;      //最近打开过的路径
 
     Time m_song_length;                 //正在播放的文件的长度
     Time m_current_position;            //当前播放到的位置
@@ -136,7 +138,6 @@ public:
     CLyrics m_Lyrics;               //歌词
 
     SortMode m_sort_mode;           //排序方式
-    bool m_descending{};            //是否降序排列
 
     bool m_loading{ false };        //如果正在载入播放列表，则为true
 
@@ -152,13 +153,22 @@ private:
     std::list<int> m_random_list;          //随机播放模式下的历史记录，用于回溯之前的记录
     deque<int> m_next_tracks{};       //下n首播放的歌曲，用于“下一首播放”
 
-    bool m_playlist_mode{ false };          //如果播放列表中的曲目来自播放列表文件，而不是从一个路径下搜索到的，则为true
+    //播放列表模式
+    enum PlaylistMode
+    {
+        PM_FOLDER,              //文件夹模式
+        PM_PLAYLIST,            //播放列表模式
+        PM_MEDIA_LIB            //媒体库模式
+    };
+
+    PlaylistMode m_playlist_mode{ PM_FOLDER };          //当前的播放列表模式
 
     Time m_a_repeat{};                      //AB循环中A点的时间
     Time m_b_repeat{};                      //AB循环中B点的时间
     ABRepeatMode m_ab_repeat_mode{};
 
     bool m_file_opend{ false };             //如果打开了一个文件，则为true
+    bool m_player_core_inited{ false };     //播放内核是否初始化
     bool m_contain_sub_folder{ false };     //文件夹模式是否包含子文件夹
 
     AlbumCoverInfo m_album_cover_info;
@@ -167,26 +177,18 @@ private:
     //初始化播放内核
     void IniPlayerCore();
     void UnInitPlayerCore();
-    //初始化播放列表(如果参数playlist_mode为true，则为播放列表模式，否则从指定目录下搜索文件；
-    //如果refresh_info为true，则不管媒体库里是否有当前歌曲的信息，都从文件重新获取信息)
-    void IniPlayList(bool playlist_mode = false, bool refresh_info = false, bool play = false);
 
-    //改变当前路径
-    void ChangePath(const wstring& path, int track = 0, bool play = false);
+    // 此方法进行重新填充m_playlist以及一些共有操作，最后会启动初始化播放列表线程函数，调用前必须停止播放
+    // 调用完此方法后请尽快返回并且尽量不要执行任何操作，应当提前进行或安排在IniPlaylistComplate中进行
+    // 此方法返回后的任何修改数据的操作都应视为（实际上也是如此）与IniPlaylistThreadFunc及IniPlaylistComplate处于竞争状态
+    // play参数会传递到IniPlaylistComplate指示是否播放，refresh_info指示初始化线程刷新级别
+    void IniPlayList(bool play = false, MediaLibRefreshMode refresh_mode = MR_MIN_REQUIRED);
 
     //应用一个均衡器通道的增益
     void ApplyEqualizer(int channel, int gain);
 
-    //从文件载入最近路径列表
-    void LoadRecentPath();
-    //从文件载入最近播放播放列表列表
-    void LoadRecentPlaylist();
 public:
     void SaveCurrentPlaylist();
-    void EmplaceCurrentPathToRecent();
-    void EmplaceCurrentPlaylistToRecent();
-    //将最近路径列表保存到文件
-    void SaveRecentPath() const;
     //退出时的处理
     void OnExit();
     //播放列表加载完毕时的处理
@@ -235,8 +237,15 @@ private:
 
 private:
     static CPlayer m_instance;      //CPlayer类唯一的对象
-    CCriticalSection m_critical;
     CCriticalSection m_album_cover_sync;    //用于专辑封面的线程同步对象
+    std::timed_mutex m_play_status_sync;    // 更改播放状态时加锁，请使用GetPlayStatusMutex获取
+public:
+    // 在“稳态”（稳定的播放/暂停/停止）之间切换期间请先持有此锁，避免其他线程中途介入以及当前操作发生重入
+    // 持有锁的临界区应尽量长整个切换期间不应当发生解锁再加锁，主窗口定时器回调(TIMER_ELAPSE ms)/UI线程会以try_lock方式获取锁
+    // 启动初始化播放列表线程的方法以try_lock_for获取锁再正式进行，由IniPlaylistComplate解锁 注：更安全的if (m_loading) return;
+    // 以上加锁的操作及其中调用的方法切勿重复加锁会有未定义行为，也不能换成递归锁(防止重入)
+    // 判断与以上操作互斥的操作理论上也应当加锁但我没有检查会不会死锁，可以放弃的操作可以用try_lock_for进行
+    std::timed_mutex& GetPlayStatusMutex() { return m_play_status_sync; }
 
 public:
     //获取CPlayer类的唯一的对象
@@ -251,11 +260,13 @@ public:
     //使用指定播放列表文件来初始化CPlayer类
     void CreateWithPlaylist(const wstring& playlist_path);
     //控制音乐播放
-    void MusicControl(Command command, int volume_step = 2);
+    void MusicControl(Command command, int volume_step = 0);
     //判断当前音乐是否播放完毕
     bool SongIsOver() const;
-    //从播放内核获取当前播放到的位置（更新m_current_position）
+    //从播放内核获取当前播放到的位置（更新m_current_position），调用需要取得播放状态锁
     void GetPlayerCoreCurrentPosition();
+    //用m_volume的值设置音量
+    void SetVolume();
 
     //计算频谱分析
     void CalculateSpectralData();
@@ -264,42 +275,74 @@ public:
     //判断当前是否正在播放
     bool IsPlaying() const;
 
-    //播放指定序号的歌曲，如果是播放结束自动播放下一曲，则auto_next为true
+    // 播放指定序号的歌曲，如果是播放结束自动播放下一曲（主定时器），则auto_next为true（其他情况不能为true）
+    // auto_next为false时返回false说明没能取得播放状态锁，应当给出稍后再试的提示
     bool PlayTrack(int song_track, bool auto_next = false);
-    bool PlayAfterCurrentTrack(std::vector<int> tracks_to_play);		//设置指定序号歌曲为下一首播放的歌曲
+    // 设置指定序号歌曲为下一首播放的歌曲，无效的index会被忽略
+    bool PlayAfterCurrentTrack(const std::vector<int>& tracks_to_play);
+    // 设置指定SongInfo为下一首播放的歌曲，不存在于m_playlist的条目会被忽略
+    bool PlayAfterCurrentTrack(const std::vector<SongInfo>& tracks_to_play);
 private:
     void LoopPlaylist(int& song_track);
 
+    // 更新并保存最近播放文件夹/播放列表到文件，PlayTrack不需要保存playlist故设置参数控制
+    void SaveRecentInfoToFiles(bool save_playlist = true);
+    // 启动列表初始化方法前的共有操作
+    bool BeforeIniPlayList(bool continue_play = false, bool force_continue_play = false);
+
 public:
-    //用m_volume的值设置音量
-    void SetVolume();
+    // 以下方法调用后时间上直到IniPlaylistComplate的最后unlock为止
+    // 都是处于与IniPlaylistThreadFunc/IniPlaylistComplate/CMusicPlayerDlg::OnPlaylistIniComplate的数据竞争状态
+    // 这些方法已经尽量包办了所有需要的操作，调用方请尽快返回
+    // 返回false（addtoplaylist返回-1）时调用方需要放弃并提示用户重试，初始化流程需要主线程参与故返回false时等待无意义
 
-    // 切换到指定路径的文件夹模式，没有PathInfo时应使用CPlayer::OpenFolder
-    void SetPath(const PathInfo& path_info);
-    // 切换到指定播放列表模式 
-    // force为true时忽略continue_when_switch_playlist设置播放track指定歌曲
-    void SetPlaylist(const wstring& playlist_path, int track, int position, bool init = false, bool play = false, bool force = false);
+#pragma region 列表初始化方法
+
+    // 切换到指定路径的文件夹模式，没有PathInfo时应使用CPlayer::OpenFolder（没能取得播放状态锁返回false）
+    bool SetPath(const PathInfo& path_info, bool play = false);
     // 切换到指定路径的播放列表模式/通过“打开文件夹”来设置路径的处理
-    void OpenFolder(wstring path, bool contain_sub_folder = false, bool play = false);
+    // （不进行“切换播放列表时继续播放”）（没能取得播放状态锁返回false）
+    bool OpenFolder(wstring path, bool contain_sub_folder = false, bool play = false);
 
-    // 向默认播放列表添加并打开多个文件，play用来设置是否立即播放
+    // 切换到指定播放列表模式（没能取得播放状态锁返回false）
+    // force为true时忽略continue_when_switch_playlist设置播放track指定歌曲
+    bool SetPlaylist(const wstring& playlist_path, int track, int position, bool play = false, bool force = false);
+    // 打开一个播放列表文件（没能取得播放状态锁返回false）
+    // 支持所有支持的播放列表格式，不在默认播放列表目录则以.playlist格式复制到默认播放列表目录，会修改参数file_path为复制后的路径
+    bool OpenPlaylistFile(wstring& file_path);
+
+    // 向默认播放列表添加并打开多个文件，play用来设置是否立即播放（没能取得播放状态锁返回false）
     // 由于cue解析问题，请在判断需要“添加歌曲”而不是“添加文件”时尽量使用CPlayer::OpenSongsInDefaultPlaylist代替此方法而不是使用path构建SongInfo
-    void OpenFilesInDefaultPlaylist(const vector<wstring>& files, bool play = true);
-    // 向默认播放列表添加并打开多个歌曲，play用来设置是否立即播放
-    void OpenSongsInDefaultPlaylist(const vector<SongInfo>& songs, bool play = true);
+    bool OpenFilesInDefaultPlaylist(const vector<wstring>& files, bool play = true);
+    // 向默认播放列表添加并打开多个歌曲，play用来设置是否立即播放（没能取得播放状态锁返回false）
+    bool OpenSongsInDefaultPlaylist(const vector<SongInfo>& songs, bool play = true);
     // 打开多个歌曲并覆盖临时播放列表，play用来设置是否立即播放
-    void OpenSongsInTempPlaylist(const vector<SongInfo>& songs, int play_index = 0, bool play = true);
+    bool OpenSongsInTempPlaylist(const vector<SongInfo>& songs, int play_index = 0, bool play = true);
     // 切换到此歌曲音频文件目录的文件夹模式并播放此歌曲
-    void OpenASongInFolderMode(const SongInfo& song, bool play = false);
+    bool OpenASongInFolderMode(const SongInfo& song, bool play = false);
 
-    // 打开一个播放列表文件（支持所有支持的播放列表格式，不在默认播放列表目录则以.playlist格式复制到默认播放列表目录）
-    void OpenPlaylistFile(const wstring& file_path);
-    // 向当前播放列表添加文件，仅在播放列表模式可用，如果一个都没有添加，则返回false，否则返回true
+    //切换到媒体库模式
+    //play_index为-1表示按上次播放状态还原(默认为0)，如果为大于等于0的值，则视为从头播放指定曲目; play用来设置是否立即播放
+    //play_song用于指定要播放的曲目，如果指定了play_song，则忽略play_index参数
+    //force为false时列表初始化完成后会尝试执行切换播放列表时继续播放
+    bool SetMediaLibPlaylist(CMediaClassifier::ClassificationType type, const std::wstring& name, int play_index = -1, const SongInfo& play_song = SongInfo(), bool play = false, bool force = false);
+
+    // 向当前播放列表添加文件，仅在播放列表模式可用，返回成功添加的数量（拒绝重复曲目）
     // 由于cue解析问题，请在判断需要“添加歌曲”而不是“添加文件”时尽量使用CPlayer::AddSongs代替此方法而不是使用path构建SongInfo
-    // files内含有cue原始文件时返回值可能不正确（处理在线程函数，无法及时返回是否添加，初始化线程结束后有保存操作，不必另外执行保存）
-    bool AddFilesToPlaylist(const vector<wstring>& files, bool ignore_if_exist = false);
-    // 向当前播放列表添加歌曲，仅在播放列表模式可用，如果一个都没有添加，则返回false，否则返回true
-    bool AddSongsToPlaylist(const vector<SongInfo>& songs, bool ignore_if_exist = false);
+    // files内含有cue原始文件时返回值可能不正确（处理在线程函数，无法及时得知是否添加）
+    int AddFilesToPlaylist(const vector<wstring>& files);
+    // 向当前播放列表添加歌曲，仅在播放列表模式可用，返回成功添加的数量（拒绝重复曲目）
+    int AddSongsToPlaylist(const vector<SongInfo>& songs);
+
+    // 重新载入播放列表（没能取得播放状态锁返回false）
+    bool ReloadPlaylist(MediaLibRefreshMode refresh_mode);
+    // 翻转是否包含子文件夹设置，如果当前为文件夹模式则直接重新加载播放列表（没能取得播放状态锁返回false）
+    bool SetContainSubFolder();
+
+    // 移除当前播放列表（同时删除文件）/文件夹（从最近播放中移除）并切换到默认播放列表（没能取得播放状态锁返回false）
+    bool RemoveCurPlaylistOrFolder();
+
+#pragma endregion 列表初始化方法
 
     //更改循环模式
     void SetRepeatMode();
@@ -310,16 +353,20 @@ public:
     void SlowDown();
     void SetOrignalSpeed();
     void SetSpeed(float speed);
-    float GetSpeed() { return m_speed; }
+    float GetSpeed() const { return m_speed; }
 
-    //获取BASS音频库的错误
+private:
+    // 获取CPlayer操作播放内核时产生的错误写入错误日志
     bool GetPlayerCoreError(const wchar_t* function_name);
+
+public:
     //有错误时返回ture，否则返回false
     bool IsError() const;
+    // IsError()为true时获取状态栏显示的错误字符串
     std::wstring GetErrorInfo();
 
-    //设置窗口标题（向主窗口发送消息）
-    void SetTitle() const;
+    // 通知主窗口当前播放歌曲改变需要更新显示（向主窗口发送消息）（原SetTitle）
+    void AfterSetTrack() const;
 
     //保存配置到ini文件
     void SaveConfig() const;
@@ -340,6 +387,11 @@ public:
 
     //获取播放列表的引用
     vector<SongInfo>& GetPlayList() { return m_playlist; }
+
+    // 判断参数中的曲目是否存在于m_playlist，存在返回索引不存在返回-1（IsSameSong）
+    int IsSongInPlayList(const SongInfo& song);
+    // 判断参数中的曲目是否全部存在于m_playlist（IsSameSong）
+    bool IsSongsInPlayList(const vector<SongInfo>& songs_list);
     //获取歌曲总数
     int GetSongNum() const;
     //获取当前播放曲目的目录
@@ -351,8 +403,6 @@ public:
     wstring GetCurrentFilePath() const;
     //获取当前播放的曲目序号
     int GetIndex() const { return m_index; }
-    //获取正在播放文件的文件名（当前播放文件名为空时返回"没有找到文件" IDS_FILE_NOT_FOUND）
-    wstring GetFileName() const;
     //获取正在播放文件的显示名称
     wstring GetDisplayName() const;
     int GetVolume() const { return m_volume; }
@@ -360,22 +410,25 @@ public:
     CImage& GetAlbumCoverBlur();
     bool AlbumCoverExist();
     wstring GetAlbumCoverPath() const { return m_album_cover_path; }
-    int GetAlbumCoverType() const { return m_album_cover_type; }
-    bool DeleteAlbumCover();
+    wstring GetAlbumCoverType() const;
+    //媒体库模式下获取当前播放媒体库项目的名称
+    wstring GetMedialibItemName() const { return m_media_lib_playlist_name; }
 
-    //重新载入播放列表
-    void ReloadPlaylist(bool refresh_info = true);
-
+private:
+    // 下方播放列表移除歌曲方法中的共有部分
+    void AfterRemoveSong(bool is_current);
+public:
     //从播放列表中删除指定的项目
-    bool RemoveSong(int index);
+    bool RemoveSong(int index, bool skip_locking = false);
     //从播放列表中删除多个指定的项目
-    void RemoveSongs(vector<int> indexes);
+    void RemoveSongs(vector<int> indexes, bool skip_locking = false);
     //从播放列表中移除相同的曲目，返回已移除的曲目数量
     int RemoveSameSongs();
     //从播放列表中移除无效的曲目，返回已移除的曲目数量
     int RemoveInvalidSongs();
     //清空播放列表
     void ClearPlaylist();
+
     //将指定范围内的项目上移
     bool MoveUp(int first, int last);
     //将指定范围内的项目下移
@@ -383,9 +436,9 @@ public:
     //移动多个项目到dest的位置，返回移动后第1个项目的索引
     int MoveItems(std::vector<int> indexes, int dest);
 
-    //定位到指定位置
+    // 定位到指定位置，需要加播放状态锁
     void SeekTo(int position);
-    //定位到指定位置(范围0~1)
+    // 定位到指定位置(范围0~1)，需要加播放状态锁
     void SeekTo(double position);
     //static void SeekTo(HSTREAM hStream, int position);
 
@@ -404,23 +457,20 @@ public:
     const float* GetSpectralPeakData() const { return m_spectral_peak; }
     //返回频谱分析的原始数据
     const float* GetFFTData() const { return m_fft; }
-    //返回最近播放路径列表的引用
-    deque<PathInfo>& GetRecentPath() { return m_recent_path; }
-    CPlaylistMgr& GetRecentPlaylist() { return CPlaylistMgr::Instance(); }
     //获取播放状态的字符串
     wstring GetPlayingState() const;
     //获取正在播放状态（0：已停止，1：已暂停，2：正在播放）
     int GetPlayingState2() const { return m_playing; }
+    // 获取当前SongInfo常引用，m_index无效时返回m_no_use
     const SongInfo& GetCurrentSongInfo() const;
+    // 获取当前SongInfo引用（可修改），m_index无效时返回m_no_use
     SongInfo& GetCurrentSongInfo2();
     //获取下一个要播放的曲目。如果返回的是空的SongInfo对象，则说明没有下一个曲目或下一个曲目不确定
     SongInfo GetNextTrack() const;
-    //为当前歌曲设置关联的网易云音乐歌曲ID
-    void SetRelatedSongID(wstring song_id);
-    //为第index首歌曲设置关联的网易云音乐歌曲ID
-    void SetRelatedSongID(int index, wstring song_id);
     //为当前歌曲设置“我喜欢”标记
+    void SetFavourite(int index, bool favourite);
     void SetFavourite(bool favourite);
+    bool IsFavourite(int index);
     bool IsFavourite();
     //判断当前专辑封面是否是内嵌图片
     bool IsInnerCover() const { return m_inner_cover; }
@@ -443,17 +493,13 @@ public:
     //重新初始化BASS。当replay为true时，如果原来正在播放，则重新初始化后继续播放
     void ReIniPlayerCore(bool replay = false);
 
-    //播放列表按照m_sort_mode排序（当change_index为true时，排序后重新查找正在播放的歌曲）
-    void SortPlaylist(bool change_index = true);
-    //将整个播放列表倒序
-    void InvertPlaylist();
+    //播放列表按照m_sort_mode排序（当is_init为false时，排序后重新查找正在播放的歌曲）
+    void SortPlaylist(bool is_init = false);
     //获取专辑封面
     void SearchAlbumCover();
 private:
     //当无法播放时弹出提示信息
     void ConnotPlayWarning() const;
-    bool RemoveSongNotPlay(int index);
-    void AfterSongsRemoved(bool play);
     //如果专辑封面过大，将其缩小后再加载
     void AlbumCoverResize();
     //初始化随机播放列表
@@ -466,7 +512,11 @@ public:
     void AlbumCoverGaussBlur();
     wstring GetCurrentFileType() { return m_current_file_type; }
     bool IsOsuFile() const;
-    bool IsPlaylistMode() const { return m_playlist_mode; }
+    bool IsPlaylistMode() const;    //是否为播放列表模式
+    bool IsFolderMode() const;      //是否为文件夹模式
+    bool IsMediaLibMode() const;    //是否为媒体库模式
+    //当前播放列表模式为PM_MEDIA_LIB时，获取当前播放的媒体库项目类型
+    CMediaClassifier::ClassificationType GetMediaLibPlaylistType() const;
     bool IsPlaylistEmpty() const;
 
     // 重命名播放列表后使用此方法更新播放实例（不会重新载入播放列表）
@@ -477,29 +527,32 @@ public:
     bool IsBassCore() const;
     bool IsFfmpegCore() const;
     bool IsFileOpened() const { return m_file_opend; }
+    //播放内核是否初始化完成
+    bool IsPlayerCoreInited() const { return m_player_core_inited; }
     bool IsContainSubFolder() const { return m_contain_sub_folder; }
-    void SetContainSubFolder(bool contain_sub_folder);
 
 
     MediaTransControls m_controls;
-    void UpdateControlsMetadata(SongInfo info);
-    void UpdateLastFMCurrentTrack(SongInfo info);
+    void UpdateLastFMCurrentTrack(const SongInfo& info);
 
+    // 更新SMTC封面，从路径为m_album_cover_path的图片文件
+    void MediaTransControlsLoadThumbnail();
 private:
-    void MediaTransControlsLoadThumbnail(std::wstring& file_path);
     void MediaTransControlsLoadThumbnailDefaultImage();
 
 public:
-    //用于在执行某些操作时，播放器需要关闭当前播放的歌曲，操作完成后再次打开
-    //当reopen为true时，在构造函数中关闭，析构时再次打开
+    // 用于在执行某些操作时，播放器需要关闭当前播放的歌曲，操作完成后再次打开
+    // 当reopen为true时，在构造函数中关闭，析构时再次打开
+    // 使用后需要先检查IsLockSuccess，如果返回false（极小概率）那么此次操作应当放弃并让出主线程，在主线程等待会死锁
     struct ReOpen
     {
     public:
         ReOpen(bool reopen)
             : m_reopen{ reopen }
         {
-            if (reopen)
+            if (m_reopen && !m_instance.m_loading && m_instance.GetPlayStatusMutex().try_lock_for(std::chrono::milliseconds(1000)))
             {
+                lock_success = true;
                 current_position = m_instance.GetCurrentPosition();
                 is_playing = m_instance.IsPlaying();
                 current_song = m_instance.GetCurrentSongInfo();
@@ -509,18 +562,22 @@ public:
 
         ~ReOpen()
         {
-            if (m_reopen/* && current_song.IsSameSong(m_instance.GetCurrentSongInfo())*/)
+            if (lock_success)
             {
                 m_instance.MusicControl(Command::OPEN);
                 m_instance.SeekTo(current_position);
                 if (is_playing)
                     m_instance.MusicControl(Command::PLAY);
+                m_instance.GetPlayStatusMutex().unlock();
             }
         }
+        // 返回true说明此次取得锁成功或没有进行“reopen”操作，返回false时应放弃此次操作（主线程）
+        bool IsLockSuccess() { return !m_reopen || lock_success; }
     private:
         int current_position{};
         SongInfo current_song;
         bool is_playing{};
         bool m_reopen{};
+        bool lock_success{};
     };
 };

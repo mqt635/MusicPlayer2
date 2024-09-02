@@ -116,11 +116,11 @@ static void FileToByteVector(ByteVector& data, const std::wstring& file_path)
 
     //获取文件长度
     file.seekg(0, file.end);
-    size_t length = file.tellg();
+    unsigned int length = static_cast<unsigned int>(file.tellg());
     file.seekg(0, file.beg);
 
     data.clear();
-    data.resize(static_cast<unsigned int>(length));
+    data.resize(length);
 
     file.read(data.data(), length);
 
@@ -377,15 +377,17 @@ static void OtherPropertyToSongInfo(SongInfo& song_info, const std::map<std::wst
     index = disc_number.find(L'/');
     if (index != std::wstring::npos)
     {
-        song_info.total_discs = static_cast<BYTE>(_wtoi(disc_number.substr(index + 1).c_str()));
+        song_info.total_discs = static_cast<BYTE>(CCommon::StringToInt(disc_number.substr(index + 1)));
     }
-    song_info.disc_num = static_cast<BYTE>(_wtoi(disc_number.substr(0, index).c_str()));
+    song_info.disc_num = static_cast<BYTE>(CCommon::StringToInt(disc_number));
 }
 
 template<class T>
 static void WriteOtherProperties(const SongInfo& song_info, T& file)
 {
     TagLib::PropertyMap properties = file.properties();
+    properties["ALBUMARTIST"].clear();
+    properties["DISCNUMBER"].clear();
     if (!song_info.album_artist.empty())
         properties["ALBUMARTIST"].append(song_info.album_artist);
     if (song_info.disc_num != 0)
